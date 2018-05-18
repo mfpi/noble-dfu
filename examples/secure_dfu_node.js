@@ -8,7 +8,7 @@ var crc = require("crc-32")
 var JSZip = require("jszip")
 var progress = require("progress")
 var noble = require("noble")
-var { SecureDFU } = require("../index")
+var { SecureDFU, writeCharacteristic } = require("../index")
 
 var bluetoothDevices = []
 var progressBar = null
@@ -143,25 +143,57 @@ function update(forceInit = false) {
       })
 
       console.log("Scanning for DFU devices...")
-      noble.startScanning([SecureDFU.SERVICE_UUID])
+      noble.startScanning([])
       return new Promise(resolve => {
         noble.on("discover", peripheral => handleDeviceFound(peripheral, resolve))
       })
     })
-    .then(device => {
-      console.log(`Updating ${device.id}...`)
-      for (var type of ["softdevice", "bootloader", "softdevice_bootloader"]) {
-        if (manifest[type]) {
-          return updateFirmware(dfu, dfuPackage, manifest[type], device, type).then(() => device)
-        }
+    .then(async device => {
+      let count = 0
+      while (true) {
+        console.log("Connecting", count)
+        await dfu.gattConnect(device)
+
+        const service = await dfu.getDFUOnService(device)
+
+        const characteristics = await dfu.getDFUCharacteristics(service)
+        console.log(characteristics)
+
+        const descriptors = await new Promise(resolve =>
+          characteristics[0].discoverDescriptors((_, descriptors) => {
+            resolve(descriptors)
+          })
+        )
+
+        console.info(`[turnIntoDfuMode] found descriptors (${descriptors})`)
+        const buffer = new Buffer(2)
+        buffer.writeUInt8(1, 0)
+        buffer.writeUInt8(0, 1)
+        await descriptors[0].writeValue(buffer)
+        console.info("[turnIntoDfuMode] wrote descriptor value")
+
+        const buf2 = new Buffer([0x01])
+        await writeCharacteristic(characteristics[0], buf2, false)
+
+        await dfu.waitTimeout(5000)
+
+        count++
       }
-      return device
     })
-    .then(device => {
-      if (manifest.application) {
-        return updateFirmware(dfu, dfuPackage, manifest.application, device, "application", forceInit)
-      }
-    })
+    // .then(device => {
+    //   console.log(`Updating ${device.id}...`)
+    //   for (var type of ["softdevice", "bootloader", "softdevice_bootloader"]) {
+    //     if (manifest[type]) {
+    //       return updateFirmware(dfu, dfuPackage, manifest[type], device, type).then(() => device)
+    //     }
+    //   }
+    //   return device
+    // })
+    // .then(device => {
+    //   if (manifest.application) {
+    //     return updateFirmware(dfu, dfuPackage, manifest.application, device, "application", forceInit)
+    //   }
+    // })
     .then(() => {
       console.log("Update complete!")
       process.exit()

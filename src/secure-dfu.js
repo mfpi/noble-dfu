@@ -3,6 +3,7 @@
 import EventEmitter from "events"
 
 const SERVICE_UUID = "fe59"
+const DFU_ON_UUID = "c7e70000c84711e681758c89a55d403c"
 const CONTROL_UUID = "8ec90001-f315-4f60-9fb8-838830daea50"
 const PACKET_UUID = "8ec90002-f315-4f60-9fb8-838830daea50"
 const BUTTON_UUID = "8ec90003-f315-4f60-9fb8-838830daea50"
@@ -105,7 +106,18 @@ export class SecureDFU extends EventEmitter {
     })
   }
 
-  async update(device, init, firmware, forceInit) {
+  waitTimeout(ms = 10000) {
+    return new Promise((resolve, reject) => {
+      this.log("Waiting")
+      let id = setTimeout(() => {
+        this.log("Finished waiting")
+        resolve()
+      }, ms)
+    })
+  }
+
+  async update(device, init, firmware, forceInit, count = 0) {
+    this.log(`###### COUNT ${count}`)
     this.isAborted = false
 
     if (!device) throw new Error("Device not specified")
@@ -127,6 +139,11 @@ export class SecureDFU extends EventEmitter {
         reject("disconnected")
       })
     })
+
+    this.log("Connecting")
+    await this.connect(device)
+    disconnectWatcher.catch(err => this.log("disconnect", err))
+    await this.update(device, init, firmware, forceInit, count + 1)
 
     await Promise.race([this.doUpdate(device, init, firmware, forceInit), disconnectWatcher])
     return this.disconnect(device)
@@ -190,14 +207,18 @@ export class SecureDFU extends EventEmitter {
         resolve(device)
       })
     })
+    this.log("Connected")
 
     this.log("connected to gatt server")
-    const service = await this.getDFUService(device).catch(() => {
-      this.log("Unable to find DFU service")
-      throw new Error("Unable to find DFU service")
-    })
-    this.log("found DFU service")
-    return this.getDFUCharacteristics(service)
+    // const service = await this.getDFUService(device).catch(() => {
+    //   this.log("Unable to find DFU service")
+    //   throw new Error("Unable to find DFU service")
+    // })
+    // this.log("found DFU service")
+    // return this.getDFUCharacteristics(service).catch(() => {
+    //   this.log("Unable to find dfu characteristics")
+    //   throw new Error("Unable to find DFU characteristics")
+    // })
   }
 
   disconnect(device) {
@@ -232,6 +253,27 @@ export class SecureDFU extends EventEmitter {
           }
         }
         reject("DFU service not found")
+      })
+    })
+  }
+
+  getDFUOnService(device) {
+    return new Promise((resolve, reject) => {
+      this.log("getDfuOnService: Startin discover services")
+      device.discoverServices([], (error, services) => {
+        if (error) {
+          this.log(`getDfuOnService: Error ${error}`)
+          return reject(error)
+        }
+        this.log(`getDfuOnService: Found ${services.length} services`)
+        for (let i = 0; i < services.length; i++) {
+          this.log(`getDfuOnService: Success ${services[i]}`)
+          if (services[i].uuid === DFU_ON_UUID) {
+            this.log(`getDfuOnService: Success ${services[i]}`)
+            resolve(services[i])
+          }
+        }
+        reject("DFU on service not found")
       })
     })
   }
@@ -360,7 +402,7 @@ export class SecureDFU extends EventEmitter {
     // First, select the Command Object. As a response the maximum command size and information whether there is already
     // a command saved from a previous connection is returned.
     this.log("requesting init state")
-    const response = await this.sendControl(OPERATIONS.SELECT_COMMAND)
+    let response = await this.sendControl(OPERATIONS.SELECT_COMMAND)
     let maxSize = response.getUint32(0, LITTLE_ENDIAN)
     let offset = response.getUint32(4, LITTLE_ENDIAN)
     let crc = response.getInt32(8, LITTLE_ENDIAN)
@@ -423,7 +465,7 @@ export class SecureDFU extends EventEmitter {
 
         // Calculate Checksum
         this.log("Calculating checksum")
-        const response = await this.sendControl(OPERATIONS.CALCULATE_CHECKSUM)
+        let response = await this.sendControl(OPERATIONS.CALCULATE_CHECKSUM)
         let crc = response.getInt32(4, LITTLE_ENDIAN)
         let transferred = response.getUint32(0, LITTLE_ENDIAN)
         let responsedata = buffer.slice(0, transferred)
@@ -453,6 +495,13 @@ export class SecureDFU extends EventEmitter {
     this.log("executing")
     await this.sendControl(OPERATIONS.EXECUTE)
     this.log("finished executing")
+    this.log("select data")
+    response = await this.sendControl(OPERATIONS.SELECT_DATA)
+    this.log("select command")
+    response = await this.sendControl(OPERATIONS.SELECT_COMMAND)
+    this.log("execute again")
+    await this.sendControl(OPERATIONS.EXECUTE)
+    this.log("executed")
 
     return true
   }
@@ -462,7 +511,7 @@ export class SecureDFU extends EventEmitter {
     this.bailOnAbort()
     // SELECT_DATA: [0x06, 0x02],
     this.log("requesting firmware state")
-    const response = await this.sendControl(OPERATIONS.SELECT_DATA)
+    let response = await this.sendControl(OPERATIONS.SELECT_DATA)
     let maxSize = response.getUint32(0, LITTLE_ENDIAN)
     let offset = response.getUint32(4, LITTLE_ENDIAN)
     let crc = response.getInt32(8, LITTLE_ENDIAN)
@@ -513,6 +562,14 @@ export class SecureDFU extends EventEmitter {
       let end = 0
       // Each page will be sent in MAX_ATTEMPTS
       do {
+        this.log("select command")
+        let response = await this.sendControl(OPERATIONS.SELECT_COMMAND)
+        this.log("execute again")
+        await this.sendControl(OPERATIONS.EXECUTE)
+        this.log("select data")
+        response = await this.sendControl(OPERATIONS.SELECT_DATA)
+        this.log("select data done")
+
         this.log(`starting attempt #${attempt}`)
         const start = offset - offset % maxSize
         const writeStart = offset
@@ -534,7 +591,7 @@ export class SecureDFU extends EventEmitter {
 
         // Calculate Checksum
         this.log("Calculating checksum")
-        const response = await this.sendControl(OPERATIONS.CALCULATE_CHECKSUM)
+        response = await this.sendControl(OPERATIONS.CALCULATE_CHECKSUM)
         crc = response.getInt32(4, LITTLE_ENDIAN)
         let transferred = response.getUint32(0, LITTLE_ENDIAN)
         this.log(`Received checksum: crc: ${crc}, transferred: ${transferred}`)
@@ -646,7 +703,7 @@ const isLinux = /^linux/.test(process.platform)
 
 const defaultWithoutResponse = !isWindows && !isLinux
 
-function writeCharacteristic(characteristic, buffer, withoutResponse = defaultWithoutResponse) {
+export function writeCharacteristic(characteristic, buffer, withoutResponse = defaultWithoutResponse) {
   return new Promise((resolve, reject) => {
     characteristic.write(buffer, withoutResponse, error => {
       if (error) return reject(error)

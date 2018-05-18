@@ -1,1 +1,1 @@
-export { SecureDFU } from "./secure-dfu"
+export { SecureDFU, writeCharacteristic } from "./secure-dfu"
