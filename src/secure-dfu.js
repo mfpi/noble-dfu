@@ -641,10 +641,7 @@ function getCanonicalUUID(uuid) {
   return uuid
 }
 
-const isWindows = /^win32/.test(process.platform)
-const isLinux = /^linux/.test(process.platform)
-
-const defaultWithoutResponse = !isWindows && !isLinux
+const defaultWithoutResponse = false
 
 function writeCharacteristic(characteristic, buffer, withoutResponse = defaultWithoutResponse) {
   return new Promise((resolve, reject) => {
